@@ -26,8 +26,8 @@ import threading
 import time
 
 # === CONFIGURACIÓN DE TELEGRAM ===
-TELEGRAM_TOKEN = "TU_TOKEN_AQUI"
-TELEGRAM_CHAT_ID = "TU_CHAT_ID_AQUI"
+TELEGRAM_TOKEN = os.environ.get("TGT")
+TELEGRAM_CHAT_ID = os.environ.get("TGID")
 
 # === HISTORIAL DE ALERTAS ===
 HISTORIAL_FILE = "historial_alertas.json"
