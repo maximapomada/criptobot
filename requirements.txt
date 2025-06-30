@@ -8,3 +8,5 @@ pytz
 requests
 openpyxl
 numpy==1.24.4
+setuptools
+wheel
