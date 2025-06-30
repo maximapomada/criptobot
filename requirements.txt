@@ -1,0 +1,10 @@
+streamlit
+ccxt
+pandas
+pandas_ta
+plotly
+apscheduler
+pytz
+requests
+openpyxl
+numpy==1.24.4

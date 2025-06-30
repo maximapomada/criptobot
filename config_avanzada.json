@@ -1,0 +1,29 @@
+{
+  "filtros": {
+    "volumen_minimo": 0,
+    "confirmacion_patrones": true,
+    "tolerancia_patrones": 0.03,
+    "min_velas_patron": 3
+  },
+  "indicadores": {
+    "usar_bollinger": false,
+    "usar_fibonacci": false,
+    "usar_ichimoku": false,
+    "usar_atr": false
+  },
+  "alertas": {
+    "nivel_fiabilidad": "medio",
+    "mostrar_probabilidad": true
+  },
+  "patrones_vela": {
+    "doji": true,
+    "morning_star": true,
+    "evening_star": true,
+    "harami": true,
+    "shooting_star": true
+  },
+  "rendimiento": {
+    "analisis_paralelo": false,
+    "max_pares_simultaneos": 10
+  }
+}
