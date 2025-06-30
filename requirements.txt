@@ -10,3 +10,4 @@ openpyxl
 numpy==1.24.4
 setuptools
 wheel
+TA-Lib
