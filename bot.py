@@ -502,6 +502,25 @@ if st.sidebar.button("💾 Guardar configuración de suelos"):
 st.sidebar.markdown("---")
 st.sidebar.markdown("**🔄 Autoanálisis**")
 
+# --- NUEVO BLOQUE PARA EDITAR CONFIGURACIONES EXISTENTES ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("**🧹 Eliminar Configuraciones de Autoanálisis**")
+
+config_actual = cargar_auto_config()
+items = []
+for sym, cfg in config_actual.items():
+    for tf, freq in cfg.items():
+        items.append(f"{sym} | {tf} | {freq}")
+
+seleccionados = st.sidebar.multiselect("Selecciona configuraciones a eliminar:", items)
+
+if st.sidebar.button("🧹 Borrar seleccionados"):
+    for item in seleccionados:
+        sym, tf, _ = item.split(" | ")
+        remove_auto_config(sym, tf)
+    st.sidebar.success("✅ Configuraciones eliminadas")
+
+
 with st.sidebar.expander("Configurar Autoanálisis", expanded=False):
     auto_symbol = st.selectbox("Par para autoanálisis", symbols, key="auto_symbol")
     auto_timeframe = st.selectbox("Timeframe", ["1d", "1w", "1M", "1y"], key="auto_tf")
