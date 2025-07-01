@@ -1,9 +1,4 @@
 {
-  "BTC/USDT": {
-    "1y": {
-      "por_mes": 2
-    }
-  },
   "ETH/USDT": {
     "1d": 2,
     "1w": 1
