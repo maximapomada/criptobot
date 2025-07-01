@@ -1116,3 +1116,15 @@ def guardar_config_auto(config, ruta="config_auto.json"):
         rama="main"
     )
 
+def cargar_auto_config(ruta="config_auto.json"):
+    if os.path.exists(ruta):
+        with open(ruta, "r") as f:
+            return json.load(f)
+    return {}
+
+def set_auto_config(symbol, timeframe, valor):
+    config = cargar_auto_config()
+    if symbol not in config:
+        config[symbol] = {}
+    config[symbol][timeframe] = valor
+    guardar_config_auto(config)
