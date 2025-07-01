@@ -1,712 +1,538 @@
+# newstuff.py
+
 import streamlit as st
-import ccxt
 import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
-import requests
-import io
+import numpy as np
+from datetime import datetime, timedelta
 import json
 import os
-from datetime import datetime, timedelta
-import newstuff
 
-st.set_page_config(
-    page_title="Bot de Análisis Crypto - Poloniex", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Configuración avanzada
+CONFIG_AVANZADA_FILE = "config_avanzada.json"
 
-
-# === NUEVO: Scheduler para autoanálisis ===
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.triggers.cron import CronTrigger
-import pytz
-import threading
-import time
-
-# === CONFIGURACIÓN DE TELEGRAM ===
-TELEGRAM_TOKEN = os.environ.get("TGT")
-TELEGRAM_CHAT_ID = os.environ.get("TGID")
-
-# === HISTORIAL DE ALERTAS ===
-HISTORIAL_FILE = "historial_alertas.json"
-if os.path.exists(HISTORIAL_FILE):
-    with open(HISTORIAL_FILE, "r") as f:
-        historial_alertas = json.load(f)
-else:
-    historial_alertas = {}
-
-def guardar_historial():
-    with open(HISTORIAL_FILE, "w") as f:
-        json.dump(historial_alertas, f, indent=2, default=str)
-
-def alerta_ya_enviada(par, tipo, timestamp):
-    clave = f"{par}_{tipo}_{timestamp}"
-    return clave in historial_alertas
-
-def registrar_alerta(par, tipo, timestamp):
-    clave = f"{par}_{tipo}_{timestamp}"
-    historial_alertas[clave] = str(datetime.now())
-    guardar_historial()
-
-# === CONFIGURACIÓN DE RECENCIA POR MONEDA ===
-CONFIG_FILE = "config_suelos.json"
-if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, "r") as f:
-        config_suelos = json.load(f)
-else:
-    config_suelos = {}
-
-def guardar_config():
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config_suelos, f, indent=2)
-
-def get_recencia_config(par):
-    if par in config_suelos:
-        return config_suelos[par].get("recencia_velas", 2), config_suelos[par].get("recencia_dias", 0)
-    else:
-        return 2, 0
-
-def set_recencia_config(par, recencia_velas, recencia_dias):
-    config_suelos[par] = {"recencia_velas": recencia_velas, "recencia_dias": recencia_dias}
-    guardar_config()
-
-# === CONFIGURACIÓN DE AUTOANÁLISIS ===
-AUTO_CONFIG_FILE = "config_auto.json"
-
-def cargar_auto_config():
-    ejemplo = {
-        "BTC/USDT": {
-            "1d": 3,
-            "1w": 1,
-            "1M": {"por_semana": 5},
-            "1y": {"por_mes": 2}
-        },
-        "ETH/USDT": {
-            "1d": 2,
-            "1w": 1
-        }
-    }
-    if os.path.exists(AUTO_CONFIG_FILE):
-        with open(AUTO_CONFIG_FILE, "r") as f:
+# Cargar configuración avanzada o crear por defecto
+def cargar_config_avanzada():
+    if os.path.exists(CONFIG_AVANZADA_FILE):
+        with open(CONFIG_AVANZADA_FILE, "r") as f:
             return json.load(f)
     else:
-        with open(AUTO_CONFIG_FILE, "w") as f:
-            json.dump(ejemplo, f, indent=2)
-        return ejemplo
-
-def guardar_auto_config(config_auto):
-    with open(AUTO_CONFIG_FILE, "w") as f:
-        json.dump(config_auto, f, indent=2)
-
-def set_auto_config(symbol, timeframe, valor):
-    config = cargar_auto_config()
-    if symbol not in config:
-        config[symbol] = {}
-    config[symbol][timeframe] = valor
-    guardar_auto_config(config)
-
-def remove_auto_config(symbol, timeframe=None):
-    config = cargar_auto_config()
-    if symbol in config:
-        if timeframe and timeframe in config[symbol]:
-            del config[symbol][timeframe]
-            if not config[symbol]:  # Si no quedan timeframes, eliminar el símbolo
-                del config[symbol]
-        else:
-            del config[symbol]
-        guardar_auto_config(config)
-
-# === FUNCIONES DE ALERTA Y ANÁLISIS ===
-def send_telegram_alert(message, symbol, timestamp, tipo):
-    if alerta_ya_enviada(symbol, tipo, timestamp):
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            registrar_alerta(symbol, tipo, timestamp)
-            return True
-        else:
-            print(f"Error en Telegram: {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"Error al enviar alerta: {e}")
-        return False
-
-# === PATRONES DE VELA ===
-PATRONES_VELA = {
-    'hammer': ('🔨 Martillo', 'Patrón de reversión alcista'),
-    'engulfing': ('🟢 Envolvente', 'Patrón de reversión'),
-    'doji': ('✴️ Doji', 'Indecisión del mercado'),
-    'morning_star': ('🌅 Estrella Matutina', 'Reversión alcista'),
-    'evening_star': ('🌇 Estrella Vespertina', 'Reversión bajista'),
-    'harami': ('🕯️ Harami', 'Patrón de reversión'),
-    'shooting_star': ('🌠 Estrella Fugaz', 'Reversión bajista')
-}
-
-def obtener_patrones_vela(df):
-    patrones_encontrados = []
-    ultimo = df.iloc[-1]
-
-    for patron, (emoji_nombre, descripcion) in PATRONES_VELA.items():
-        if patron in df.columns and ultimo[patron] != 0:
-            patrones_encontrados.append({
-                'patron': patron,
-                'nombre': emoji_nombre,
-                'descripcion': descripcion,
-                'valor': ultimo[patron]
-            })
-
-    return patrones_encontrados
-
-# === SCHEDULER ===
-scheduler = BackgroundScheduler(timezone=pytz.utc)
-scheduler_started = False
-
-def minutos_por_ejecucion(timeframe, freq):
-    if timeframe == "1d":
-        return 1440 // freq  # 1440 minutos = 24 horas
-    if timeframe == "1w":
-        return 10080 // freq  # 10080 minutos = 7 días
-    return None
-
-def programar_tareas_auto(symbols):
-    global scheduler_started
-    cfg = cargar_auto_config()
-
-    # Limpiar trabajos existentes
-    scheduler.remove_all_jobs()
-
-    for symbol, tf_cfg in cfg.items():
-        if symbol not in symbols:
-            continue
-
-        for tf, valor in tf_cfg.items():
-            try:
-                if tf in ["1d", "1w"]:
-                    minutos = minutos_por_ejecucion(tf, int(valor))
-                    if minutos:
-                        scheduler.add_job(
-                            analizar_simbolo_auto,
-                            trigger=IntervalTrigger(minutes=minutos),
-                            args=[symbol, tf],
-                            id=f"auto_{symbol}_{tf}",
-                            replace_existing=True
-                        )
-                else:
-                    # Para mensual y anual
-                    if isinstance(valor, dict):
-                        unidad, veces = list(valor.items())[0]
-                        if tf == "1M":
-                            if unidad == "por_dia":
-                                trigger = CronTrigger(hour=f"*/{24//veces}")
-                            elif unidad == "por_semana":
-                                dias_semana = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][:veces]
-                                trigger = CronTrigger(day_of_week=",".join(dias_semana), hour="8")
-                            elif unidad == "por_2semanas":
-                                trigger = CronTrigger(day="1,15", hour="8")
-                            elif unidad == "por_3semanas":
-                                trigger = CronTrigger(day="1,10,20", hour="8")
-                            elif unidad == "por_mes":
-                                trigger = CronTrigger(day="1", hour="8")
-                            else:
-                                trigger = CronTrigger(day="1", hour="8")
-                        elif tf == "1y":
-                            # Para anual, ejecutar X veces al mes
-                            dias_mes = list(range(1, 32, 32//veces))[:veces]
-                            trigger = CronTrigger(day=",".join(map(str, dias_mes)), hour="8")
-                        else:
-                            continue
-
-                        scheduler.add_job(
-                            analizar_simbolo_auto,
-                            trigger=trigger,
-                            args=[symbol, tf],
-                            id=f"auto_{symbol}_{tf}",
-                            replace_existing=True
-                        )
-            except Exception as e:
-                print(f"Error programando {symbol} {tf}: {e}")
-
-    # Análisis masivo diario a las 08:00 UTC
-    scheduler.add_job(
-        analisis_masivo_diario,
-        trigger=CronTrigger(hour=8, minute=0),
-        id="analisis_masivo_diario",
-        replace_existing=True
-    )
-
-    if not scheduler_started:
-        scheduler.start()
-        scheduler_started = True
-
-# === EXCHANGE Y SÍMBOLOS ===
-@st.cache_resource
-def init_exchange():
-    return ccxt.poloniex()
-
-exchange = init_exchange()
-
-@st.cache_data(ttl=3600)
-def get_symbols():
-    try:
-        markets = exchange.load_markets()
-        return list(markets.keys())
-    except Exception as e:
-        st.error(f"Error cargando símbolos: {e}")
-        return ["BTC/USDT", "ETH/USDT"]
-
-symbols = get_symbols()
-
-# === FUNCIONES DE ANÁLISIS ===
-@st.cache_data(ttl=300)
-def get_ohlcv_data(symbol, timeframe):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=250)
-        if not ohlcv or len(ohlcv) < 2:
-            return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
-    except Exception as e:
-        print(f"Error obteniendo datos para {symbol}: {e}")
-        return None
-
-def analizar_simbolo_auto(symbol, timeframe):
-    """Función para análisis automático desde el scheduler"""
-    try:
-        alertas_resumen = {}
-        resultado = analizar_simbolo(symbol, timeframe, alertas_resumen)
-
-        if alertas_resumen:
-            enviar_resumen_telegram(alertas_resumen, timeframe, f"AUTO-{timeframe}")
-
-    except Exception as e:
-        print(f"Error en análisis automático de {symbol} {timeframe}: {e}")
-
-def analisis_masivo_diario():
-    """Análisis masivo diario de todas las monedas"""
-    try:
-        alertas_resumen = {}
-        total_analizados = 0
-
-        for symbol in symbols:
-            try:
-                resultado = analizar_simbolo(symbol, "1d", alertas_resumen)
-                if resultado:
-                    total_analizados += 1
-                time.sleep(0.1)  # Pequeña pausa entre análisis
-            except Exception as e:
-                print(f"Error analizando {symbol}: {e}")
-                continue
-
-        if alertas_resumen:
-            mensaje_extra = f"\n📊 Total analizados: {total_analizados} pares"
-            enviar_resumen_telegram(alertas_resumen, "1d", "MASIVO-DIARIO", mensaje_extra)
-
-    except Exception as e:
-        print(f"Error en análisis masivo diario: {e}")
-
-def analizar_simbolo(symbol, timeframe, alertas_resumen):
-    try:
-        df = get_ohlcv_data(symbol, timeframe)
-        if df is None or len(df) < 20:
-            return None
-
-        # Aplicar mejoras de newstuff
-        try:
-            mejoras = newstuff.aplicar_mejoras(st, df, exchange, symbols, historial_alertas, config_suelos)
-            if mejoras:
-                df = mejoras['df']
-                patrones_suelo = mejoras['patrones_suelo']
-                patrones_vela = mejoras['patrones_vela']
-                fiabilidad_doble_suelo = mejoras.get('fiabilidad_doble_suelo', 0)
-                fiabilidad_triple_suelo = mejoras.get('fiabilidad_triple_suelo', 0)
-            else:
-                patrones_suelo = {}
-                patrones_vela = {}
-                fiabilidad_doble_suelo = 0
-                fiabilidad_triple_suelo = 0
-        except Exception as e:
-            print(f"Error aplicando mejoras: {e}")
-            patrones_suelo = {}
-            patrones_vela = {}
-            fiabilidad_doble_suelo = 0
-            fiabilidad_triple_suelo = 0
-
-        # Indicadores básicos
-        if 'ema50' not in df.columns:
-            df['ema50'] = ta.ema(df['close'], length=50)
-        if 'ema200' not in df.columns:
-            df['ema200'] = ta.ema(df['close'], length=200)
-        if 'macd' not in df.columns:
-            macd = ta.macd(df['close'])
-            df['macd'] = macd['MACD_12_26_9']
-            df['macd_signal'] = macd['MACDs_12_26_9']
-        if 'rsi' not in df.columns:
-            df['rsi'] = ta.rsi(df['close'], length=14)
-
-        # Patrones de vela básicos
-        if 'hammer' not in df.columns:
-            df['hammer'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='hammer')
-        if 'engulfing' not in df.columns:
-            df['engulfing'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='engulfing')
-
-        ultimo = df.iloc[-1]
-        penultimo = df.iloc[-2] if len(df) > 1 else ultimo
-
-        # Análisis de señales
-        cruce_ema = (penultimo['ema50'] < penultimo['ema200']) and (ultimo['ema50'] > ultimo['ema200'])
-        macd_alcista = (ultimo['macd'] > ultimo['macd_signal'])
-        patron_reversion = (ultimo['hammer'] != 0) or (ultimo['engulfing'] == 100)
-
-        # Obtener patrones de vela actuales
-        patrones_vela_actuales = obtener_patrones_vela(df)
-
-        # Generar alertas
-        if symbol not in alertas_resumen:
-            alertas_resumen[symbol] = []
-
-        if patrones_suelo.get('doble', False):
-            alertas_resumen[symbol].append({
-                'tipo': 'DOBLE SUELO',
-                'emoji': '🔵',
-                'precio': ultimo['close'],
-                'fiabilidad': fiabilidad_doble_suelo,
-                'patrones_vela': patrones_vela_actuales
-            })
-
-        if patrones_suelo.get('triple', False):
-            alertas_resumen[symbol].append({
-                'tipo': 'TRIPLE SUELO',
-                'emoji': '🟣',
-                'precio': ultimo['close'],
-                'fiabilidad': fiabilidad_triple_suelo,
-                'patrones_vela': patrones_vela_actuales
-            })
-
-        if cruce_ema and macd_alcista and patron_reversion:
-            alertas_resumen[symbol].append({
-                'tipo': 'CAMBIO DE TENDENCIA ALCISTA',
-                'emoji': '🚀',
-                'precio': ultimo['close'],
-                'fiabilidad': 75,
-                'patrones_vela': patrones_vela_actuales
-            })
-
-        # Si no hay alertas, eliminar el símbolo del resumen
-        if not alertas_resumen[symbol]:
-            del alertas_resumen[symbol]
-
-        return {
-            'symbol': symbol,
-            'precio': ultimo['close'],
-            'cruce_ema': cruce_ema,
-            'macd_alcista': macd_alcista,
-            'patron_reversion': patron_reversion,
-            'doble_suelo': patrones_suelo.get('doble', False),
-            'triple_suelo': patrones_suelo.get('triple', False),
-            'patrones_vela': patrones_vela_actuales,
-            'df': df
+        # Configuración por defecto
+        config_default = {
+            "filtros": {
+                "volumen_minimo": 0,
+                "confirmacion_patrones": True,
+                "tolerancia_patrones": 0.03,
+                "min_velas_patron": 3
+            },
+            "indicadores": {
+                "usar_bollinger": False,
+                "usar_fibonacci": False,
+                "usar_ichimoku": False,
+                "usar_atr": False
+            },
+            "alertas": {
+                "nivel_fiabilidad": "medio",  # bajo, medio, alto
+                "mostrar_probabilidad": True
+            },
+            "patrones_vela": {
+                "doji": True,
+                "morning_star": True,
+                "evening_star": True,
+                "harami": True,
+                "shooting_star": True
+            },
+            "rendimiento": {
+                "analisis_paralelo": False,
+                "max_pares_simultaneos": 10
+            }
         }
+        with open(CONFIG_AVANZADA_FILE, "w") as f:
+            json.dump(config_default, f, indent=2)
+        return config_default
 
-    except Exception as e:
-        print(f"Error analizando {symbol}: {e}")
-        return None
+# Guardar configuración avanzada
+def guardar_config_avanzada(config):
+    with open(CONFIG_AVANZADA_FILE, "w") as f:
+        json.dump(config, f, indent=2)
 
-def enviar_resumen_telegram(alertas_resumen, timeframe, tipo_analisis="MANUAL", mensaje_extra=""):
-    if not alertas_resumen:
-        return
+# Función para mostrar la sección de configuración avanzada
+def mostrar_configuracion_avanzada():
+    config = cargar_config_avanzada()
 
-    mensaje = f"🔍 RESUMEN DE ANÁLISIS {tipo_analisis}\n"
-    mensaje += f"⏰ Timeframe: {timeframe}\n"
-    mensaje += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-    mensaje += f"🎯 Señales encontradas: {len(alertas_resumen)}\n\n"
+    st.markdown("### ⚙️ Configuración Avanzada")
 
-    for symbol, alertas in alertas_resumen.items():
-        for alerta in alertas:
-            mensaje += f"{alerta['emoji']} **{symbol}**\n"
-            mensaje += f"   📊 {alerta['tipo']}\n"
-            mensaje += f"   💰 Precio: {alerta['precio']:.8f}\n"
-
-            if 'fiabilidad' in alerta and isinstance(alerta['fiabilidad'], (int, float)) and alerta['fiabilidad'] > 0:
-                mensaje += f"   🎯 Fiabilidad: {alerta['fiabilidad']}%\n"
-
-            if alerta.get('patrones_vela'):
-                patrones_txt = " | ".join([p['nombre'] for p in alerta['patrones_vela']])
-                mensaje += f"   🕯️ Velas: {patrones_txt}\n"
-
-            mensaje += "\n"
-
-    if mensaje_extra:
-        mensaje += mensaje_extra
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    send_telegram_alert(mensaje, f"RESUMEN_{tipo_analisis}", timestamp, "analisis_resumen")
-
-# === INICIALIZACIÓN DEL SCHEDULER ===
-def start_scheduler_once():
-    if not hasattr(st.session_state, "scheduler_started"):
-        try:
-            threading.Thread(target=programar_tareas_auto, args=(symbols,), daemon=True).start()
-            st.session_state.scheduler_started = True
-        except Exception as e:
-            print(f"Error iniciando scheduler: {e}")
-
-# === STREAMLIT UI ===
-
-st.title("🤖 Bot de Análisis de Criptomonedas - Poloniex")
-st.markdown("*Detección automática de patrones, suelos y cambios de tendencia*")
-
-# === SIDEBAR CONFIGURACIÓN ===
-st.sidebar.header("⚙️ Configuración Principal")
-
-selected_symbol = st.sidebar.selectbox(
-    "Seleccionar Par de Trading",
-    symbols,
-    index=symbols.index('BTC/USDT') if 'BTC/USDT' in symbols else 0
-)
-
-timeframe = st.sidebar.selectbox(
-    "Intervalo de Tiempo",
-    ['12h', '1d', '3d', '1w', '1M'],
-    index=1
-)
-
-refresh_rate_min = st.sidebar.slider("Actualizar cada (minutos)", 1, 300, 5, step=1)
-
-# === CONFIGURACIÓN DE RECENCIA ===
-st.sidebar.markdown("---")
-st.sidebar.markdown("**🎯 Configuración de Suelos**")
-recencia_velas = st.sidebar.number_input(
-    "Máx. velas desde último mínimo", 
-    min_value=1, max_value=10, 
-    value=get_recencia_config(selected_symbol)[0], 
-    step=1
-)
-recencia_dias = st.sidebar.number_input(
-    "Máx. días desde último mínimo (0=ignorar)", 
-    min_value=0, max_value=30, 
-    value=get_recencia_config(selected_symbol)[1], 
-    step=1
-)
-
-if st.sidebar.button("💾 Guardar configuración de suelos"):
-    set_recencia_config(selected_symbol, recencia_velas, recencia_dias)
-    st.sidebar.success("✅ Configuración guardada")
-
-# === CONFIGURACIÓN DE AUTOANÁLISIS ===
-st.sidebar.markdown("---")
-st.sidebar.markdown("**🔄 Autoanálisis**")
-
-with st.sidebar.expander("Configurar Autoanálisis", expanded=False):
-    auto_symbol = st.selectbox("Par para autoanálisis", symbols, key="auto_symbol")
-    auto_timeframe = st.selectbox("Timeframe", ["1d", "1w", "1M", "1y"], key="auto_tf")
-
-    if auto_timeframe in ["1d", "1w"]:
-        max_freq = 4 if auto_timeframe == "1d" else 2
-        auto_freq = st.slider(f"Veces al día", 1, max_freq, 1, key="auto_freq")
-
+    with st.expander("Filtros de Patrones"):
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("💾 Guardar", key="save_auto"):
-                set_auto_config(auto_symbol, auto_timeframe, auto_freq)
-                st.success("✅ Guardado")
-                # Reprogramar tareas
-                programar_tareas_auto(symbols)
-
+            config["filtros"]["volumen_minimo"] = st.number_input(
+                "Volumen mínimo (BTC)",
+                min_value=0.0,
+                value=float(config["filtros"]["volumen_minimo"]),
+                step=0.1
+            )
+            config["filtros"]["tolerancia_patrones"] = st.slider(
+                "Tolerancia de patrones (%)",
+                min_value=0.5,
+                max_value=10.0,
+                value=float(config["filtros"]["tolerancia_patrones"] * 100),
+                step=0.5
+            ) / 100
         with col2:
-            if st.button("🗑️ Eliminar", key="del_auto"):
-                remove_auto_config(auto_symbol, auto_timeframe)
-                st.success("✅ Eliminado")
-                programar_tareas_auto(symbols)
+            config["filtros"]["confirmacion_patrones"] = st.checkbox(
+                "Requerir confirmación de patrones",
+                value=config["filtros"]["confirmacion_patrones"]
+            )
+            config["filtros"]["min_velas_patron"] = st.number_input(
+                "Mínimo de velas para patrón",
+                min_value=2,
+                max_value=10,
+                value=int(config["filtros"]["min_velas_patron"])
+            )
 
-    else:  # 1M o 1y
-        if auto_timeframe == "1M":
-            unidades = ["por_dia", "por_semana", "por_2semanas", "por_3semanas", "por_mes"]
-            max_veces = 25
-        else:  # 1y
-            unidades = ["por_mes"]
-            max_veces = 10
-
-        auto_unidad = st.selectbox("Unidad", unidades, key="auto_unidad")
-        auto_veces = st.number_input("Veces", 1, max_veces, 1, key="auto_veces")
-
+    with st.expander("Indicadores Adicionales"):
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("💾 Guardar", key="save_auto_complex"):
-                set_auto_config(auto_symbol, auto_timeframe, {auto_unidad: int(auto_veces)})
-                st.success("✅ Guardado")
-                programar_tareas_auto(symbols)
-
+            config["indicadores"]["usar_bollinger"] = st.checkbox(
+                "Bandas de Bollinger",
+                value=config["indicadores"]["usar_bollinger"]
+            )
+            config["indicadores"]["usar_fibonacci"] = st.checkbox(
+                "Retrocesos de Fibonacci",
+                value=config["indicadores"]["usar_fibonacci"]
+            )
         with col2:
-            if st.button("🗑️ Eliminar", key="del_auto_complex"):
-                remove_auto_config(auto_symbol, auto_timeframe)
-                st.success("✅ Eliminado")
-                programar_tareas_auto(symbols)
+            config["indicadores"]["usar_ichimoku"] = st.checkbox(
+                "Ichimoku Cloud",
+                value=config["indicadores"]["usar_ichimoku"]
+            )
+            config["indicadores"]["usar_atr"] = st.checkbox(
+                "ATR (Average True Range)",
+                value=config["indicadores"]["usar_atr"]
+            )
 
-# Mostrar configuración actual
-config_actual = cargar_auto_config()
-if config_actual:
-    st.sidebar.markdown("**📋 Configuración Actual:**")
-    for sym, cfg in config_actual.items():
-        st.sidebar.text(f"• {sym}")
-        for tf, freq in cfg.items():
-            st.sidebar.text(f"  {tf}: {freq}")
+    with st.expander("Configuración de Alertas"):
+        config["alertas"]["nivel_fiabilidad"] = st.select_slider(
+            "Nivel de fiabilidad requerido",
+            options=["bajo", "medio", "alto"],
+            value=config["alertas"]["nivel_fiabilidad"]
+        )
+        config["alertas"]["mostrar_probabilidad"] = st.checkbox(
+            "Mostrar probabilidad en alertas",
+            value=config["alertas"]["mostrar_probabilidad"]
+        )
 
-# === BOTONES DE ACCIÓN ===
-st.sidebar.markdown("---")
-col1, col2 = st.sidebar.columns(2)
+    with st.expander("Patrones de Vela Adicionales"):
+        col1, col2 = st.columns(2)
+        with col1:
+            config["patrones_vela"]["doji"] = st.checkbox(
+                "Doji",
+                value=config["patrones_vela"]["doji"]
+            )
+            config["patrones_vela"]["morning_star"] = st.checkbox(
+                "Morning Star",
+                value=config["patrones_vela"]["morning_star"]
+            )
+            config["patrones_vela"]["harami"] = st.checkbox(
+                "Harami",
+                value=config["patrones_vela"]["harami"]
+            )
+        with col2:
+            config["patrones_vela"]["evening_star"] = st.checkbox(
+                "Evening Star",
+                value=config["patrones_vela"]["evening_star"]
+            )
+            config["patrones_vela"]["shooting_star"] = st.checkbox(
+                "Shooting Star",
+                value=config["patrones_vela"]["shooting_star"]
+            )
 
-with col1:
-    if st.button("🔄 Analizar Todas", key="analyze_all"):
-        with st.spinner("Analizando todas las monedas..."):
-            alertas_resumen = {}
-            progress_bar = st.progress(0)
+    with st.expander("Optimización de Rendimiento"):
+        config["rendimiento"]["analisis_paralelo"] = st.checkbox(
+            "Análisis en paralelo (experimental)",
+            value=config["rendimiento"]["analisis_paralelo"]
+        )
+        if config["rendimiento"]["analisis_paralelo"]:
+            config["rendimiento"]["max_pares_simultaneos"] = st.slider(
+                "Máximo de pares simultáneos",
+                min_value=5,
+                max_value=50,
+                value=int(config["rendimiento"]["max_pares_simultaneos"])
+            )
 
-            for i, symbol in enumerate(symbols[:50]):  # Limitar a 50
-                try:
-                    analizar_simbolo(symbol, timeframe, alertas_resumen)
-                    progress_bar.progress((i + 1) / min(50, len(symbols)))
-                except:
+    if st.button("Guardar Configuración Avanzada"):
+        guardar_config_avanzada(config)
+        st.success("✅ Configuración guardada correctamente")
+
+    return config
+
+# Función para calcular indicadores adicionales
+def calcular_indicadores_adicionales(df, config):
+    # Bandas de Bollinger
+    if config["indicadores"]["usar_bollinger"]:
+        bollinger = ta.bbands(df['close'], length=20, std=2)
+        df['bb_upper'] = bollinger['BBU_20_2.0']
+        df['bb_middle'] = bollinger['BBM_20_2.0']
+        df['bb_lower'] = bollinger['BBL_20_2.0']
+
+    # ATR (Average True Range)
+    if config["indicadores"]["usar_atr"]:
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+
+    # Ichimoku Cloud
+    if config["indicadores"]["usar_ichimoku"]:
+        ichimoku = ta.ichimoku(df['high'], df['low'], df['close'])
+        df['tenkan'] = ichimoku['ITS_9']
+        df['kijun'] = ichimoku['IKS_26']
+        df['senkou_a'] = ichimoku['ISA_9_26']
+        df['senkou_b'] = ichimoku['ISB_9_26']
+
+    # Fibonacci no se calcula como columna, se usa en el análisis
+
+    return df
+
+# Función para detectar patrones de vela adicionales
+def detectar_patrones_vela(df, config):
+    patrones_detectados = {}
+
+    if config["patrones_vela"]["doji"]:
+        df['doji'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='doji')
+        patrones_detectados['doji'] = df['doji'].iloc[-1] != 0
+
+    if config["patrones_vela"]["morning_star"]:
+        df['morning_star'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='morningstar')
+        patrones_detectados['morning_star'] = df['morning_star'].iloc[-1] != 0
+
+    if config["patrones_vela"]["evening_star"]:
+        df['evening_star'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='eveningstar')
+        patrones_detectados['evening_star'] = df['evening_star'].iloc[-1] != 0
+
+    if config["patrones_vela"]["harami"]:
+        df['harami'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='harami')
+        patrones_detectados['harami'] = df['harami'].iloc[-1] != 0
+
+    if config["patrones_vela"]["shooting_star"]:
+        df['shooting_star'] = ta.cdl_pattern(df['open'], df['high'], df['low'], df['close'], name='shootingstar')
+        patrones_detectados['shooting_star'] = df['shooting_star'].iloc[-1] != 0
+
+    return df, patrones_detectados
+
+# Función mejorada para detectar doble/triple suelo con mayor tolerancia
+def detectar_doble_triple_suelo_mejorado(df, config, ventana=20):
+    tolerancia = config["filtros"]["tolerancia_patrones"]
+    min_velas = config["filtros"]["min_velas_patron"]
+
+    suelos = []
+    precios = df['close'].tail(ventana).values
+    idxs = df['close'].tail(ventana).index
+    fechas = df['timestamp'].tail(ventana).values
+    volumenes = df['volume'].tail(ventana).values if 'volume' in df.columns else None
+
+    # Detectar mínimos locales
+    for i in range(min_velas, len(precios)-min_velas):
+        # Verificar si es un mínimo local en una ventana de min_velas
+        es_minimo = True
+        for j in range(1, min_velas+1):
+            if precios[i] > precios[i-j] or precios[i] > precios[i+j]:
+                es_minimo = False
+                break
+
+        if es_minimo:
+            # Verificar volumen mínimo si está configurado
+            if volumenes is not None and config["filtros"]["volumen_minimo"] > 0:
+                if volumenes[i] < config["filtros"]["volumen_minimo"]:
                     continue
 
-            if alertas_resumen:
-                enviar_resumen_telegram(alertas_resumen, timeframe, "MANUAL")
-                st.success(f"✅ Análisis completado. {len(alertas_resumen)} señales encontradas.")
-            else:
-                st.info("ℹ️ No se encontraron señales relevantes.")
+            suelos.append((idxs[i], precios[i], fechas[i]))
 
-with col2:
-    if st.button("📱 Test Telegram", key="test_telegram"):
-        mensaje_test = f"🧪 Test desde Bot Poloniex\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        if send_telegram_alert(mensaje_test, "TEST", datetime.now().strftime('%Y%m%d_%H%M%S'), "test"):
-            st.success("✅ Mensaje enviado")
-        else:
-            st.error("❌ Error enviando mensaje")
+    # Buscar patrones de doble y triple suelo
+    doble = False
+    triple = False
+    idx_doble = None
+    idx_triple = None
+    fechas_doble = None
+    fechas_triple = None
+    fiabilidad_doble = 0
+    fiabilidad_triple = 0
 
-# === ANÁLISIS PRINCIPAL ===
-st.markdown("---")
+    if len(suelos) >= 2:
+        for i in range(len(suelos)-1):
+            p1 = suelos[i][1]
+            p2 = suelos[i+1][1]
 
-# Iniciar scheduler
-start_scheduler_once()
+            # Calcular diferencia porcentual
+            diferencia = abs(p1 - p2) / p1
 
-# Obtener y analizar datos
-df = get_ohlcv_data(selected_symbol, timeframe)
+            if diferencia < tolerancia:
+                doble = True
+                idx_doble = (suelos[i][0], suelos[i+1][0])
+                fechas_doble = (suelos[i][2], suelos[i+1][2])
 
-if df is not None and len(df) > 20:
-    alertas_resumen = {}
-    resultado = analizar_simbolo(selected_symbol, timeframe, alertas_resumen)
+                # Calcular fiabilidad (menor diferencia = mayor fiabilidad)
+                fiabilidad_doble = 1.0 - (diferencia / tolerancia)
 
-    if resultado:
-        col1, col2, col3, col4 = st.columns(4)
+                # Buscar triple suelo
+                if i+2 < len(suelos):
+                    p3 = suelos[i+2][1]
+                    dif1_3 = abs(p1 - p3) / p1
+                    dif2_3 = abs(p2 - p3) / p2
 
-        with col1:
-            st.metric("💰 Precio Actual", f"{resultado['precio']:.8f}")
+                    if dif1_3 < tolerancia and dif2_3 < tolerancia:
+                        triple = True
+                        idx_triple = (suelos[i][0], suelos[i+1][0], suelos[i+2][0])
+                        fechas_triple = (suelos[i][2], suelos[i+1][2], suelos[i+2][2])
 
-        with col2:
-            st.metric("📈 EMA Cross", "✅ SÍ" if resultado['cruce_ema'] else "❌ NO")
+                        # Calcular fiabilidad para triple suelo
+                        fiabilidad_triple = 1.0 - ((dif1_3 + dif2_3 + diferencia) / (3 * tolerancia))
+                        break
 
-        with col3:
-            st.metric("📊 MACD Alcista", "✅ SÍ" if resultado['macd_alcista'] else "❌ NO")
+    return {
+        'doble': doble,
+        'triple': triple,
+        'idx_doble': idx_doble if doble else None,
+        'idx_triple': idx_triple if triple else None,
+        'fechas_doble': fechas_doble if doble else None,
+        'fechas_triple': fechas_triple if triple else None,
+        'suelos': suelos,
+        'fiabilidad_doble': fiabilidad_doble,
+        'fiabilidad_triple': fiabilidad_triple
+    }
 
-        with col4:
-            st.metric("🕯️ Patrón Reversión", "✅ SÍ" if resultado['patron_reversion'] else "❌ NO")
+# Función para calcular niveles de Fibonacci
+def calcular_fibonacci(df, tendencia='alcista'):
+    if tendencia == 'alcista':
+        # Para tendencia alcista, calculamos desde mínimo a máximo
+        precio_min = df['low'].min()
+        precio_max = df['high'].max()
+    else:
+        # Para tendencia bajista, calculamos desde máximo a mínimo
+        precio_min = df['high'].max()
+        precio_max = df['low'].min()
 
-        # Mostrar patrones de vela
-        if resultado['patrones_vela']:
-            st.markdown("### 🕯️ Patrones de Vela Detectados")
-            for patron in resultado['patrones_vela']:
-                st.info(f"{patron['nombre']} - {patron['descripcion']}")
-        else:
-            st.markdown("### 🕯️ Patrones de Vela Detectados")
-            st.info("No se detectaron patrones de vela relevantes en la última vela.")
+    # Niveles de Fibonacci estándar
+    rango = abs(precio_max - precio_min)
+    niveles = {
+        '0.0': precio_min,
+        '0.236': precio_min + 0.236 * rango,
+        '0.382': precio_min + 0.382 * rango,
+        '0.5': precio_min + 0.5 * rango,
+        '0.618': precio_min + 0.618 * rango,
+        '0.786': precio_min + 0.786 * rango,
+        '1.0': precio_max
+    }
 
-        # Mostrar alertas si las hay
-        if alertas_resumen:
-            st.markdown("### 🚨 Señales Detectadas")
-            for symbol, alertas in alertas_resumen.items():
-                for alerta in alertas:
-                    st.success(f"{alerta['emoji']} **{alerta['tipo']}** - Precio: {alerta['precio']:.8f}")
+    return niveles
 
-        # Gráfico
-        if 'df' in resultado:
-            df_plot = resultado['df']
-            fig = go.Figure()
+# Función para evaluar la fiabilidad de una señal
+def evaluar_fiabilidad_senal(df, tipo_senal, patrones_vela, config):
+    fiabilidad = 0.5  # Fiabilidad base
 
-            # Candlesticks
-            fig.add_trace(go.Candlestick(
-                x=df_plot['timestamp'],
-                open=df_plot['open'],
-                high=df_plot['high'],
-                low=df_plot['low'],
-                close=df_plot['close'],
-                name="Precio"
-            ))
+    # Factores que aumentan la fiabilidad
+    if tipo_senal == 'doble_suelo' or tipo_senal == 'triple_suelo':
+        # Mayor fiabilidad para triple suelo que para doble
+        fiabilidad = 0.6 if tipo_senal == 'doble_suelo' else 0.7
 
-            # EMAs
-            if 'ema50' in df_plot.columns:
-                fig.add_trace(go.Scatter(
-                    x=df_plot['timestamp'],
-                    y=df_plot['ema50'],
-                    name="EMA 50",
-                    line=dict(color='orange', width=1)
-                ))
+        # Verificar confirmación con volumen
+        if 'volume' in df.columns:
+            ultimo_volumen = df['volume'].iloc[-1]
+            promedio_volumen = df['volume'].tail(10).mean()
+            if ultimo_volumen > promedio_volumen * 1.5:
+                fiabilidad += 0.1
 
-            if 'ema200' in df_plot.columns:
-                fig.add_trace(go.Scatter(
-                    x=df_plot['timestamp'],
-                    y=df_plot['ema200'],
-                    name="EMA 200",
-                    line=dict(color='red', width=1)
-                ))
+        # Verificar RSI en zona de sobreventa
+        if 'rsi' in df.columns and df['rsi'].iloc[-1] < 30:
+            fiabilidad += 0.1
 
-            fig.update_layout(
-                title=f"{selected_symbol} - {timeframe}",
-                xaxis_title="Fecha",
-                yaxis_title="Precio",
-                height=600
+        # Verificar si hay patrones de vela confirmatorios
+        patrones_alcistas = ['hammer', 'morning_star', 'harami']
+        for patron in patrones_alcistas:
+            if patron in patrones_vela and patrones_vela[patron]:
+                fiabilidad += 0.05
+
+    elif tipo_senal == 'divergencia_alcista':
+        # Verificar fuerza de la divergencia
+        if 'rsi' in df.columns:
+            rsi_actual = df['rsi'].iloc[-1]
+            if rsi_actual < 30:
+                fiabilidad += 0.15
+            elif rsi_actual < 40:
+                fiabilidad += 0.1
+
+        # Verificar si hay patrones de vela confirmatorios
+        if any(patrones_vela.values()):
+            fiabilidad += 0.1
+
+    # Limitar la fiabilidad entre 0 y 1
+    fiabilidad = min(max(fiabilidad, 0), 1)
+
+    # Convertir a nivel cualitativo
+    if fiabilidad >= 0.7:
+        nivel = "alto"
+    elif fiabilidad >= 0.5:
+        nivel = "medio"
+    else:
+        nivel = "bajo"
+
+    return {
+        'valor': fiabilidad,
+        'nivel': nivel,
+        'porcentaje': int(fiabilidad * 100)
+    }
+
+# Función para añadir indicadores al gráfico
+def añadir_indicadores_al_grafico(fig, df, config):
+    if config["indicadores"]["usar_bollinger"] and 'bb_upper' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['bb_upper'],
+            mode='lines',
+            name='BB Superior',
+            line=dict(color='rgba(250, 128, 114, 0.7)', width=1, dash='dot')
+        ))
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['bb_middle'],
+            mode='lines',
+            name='BB Media',
+            line=dict(color='rgba(128, 128, 128, 0.7)', width=1, dash='dot')
+        ))
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['bb_lower'],
+            mode='lines',
+            name='BB Inferior',
+            line=dict(color='rgba(144, 238, 144, 0.7)', width=1, dash='dot')
+        ))
+
+    if config["indicadores"]["usar_ichimoku"] and 'tenkan' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['tenkan'],
+            mode='lines',
+            name='Tenkan-sen',
+            line=dict(color='red', width=1)
+        ))
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['kijun'],
+            mode='lines',
+            name='Kijun-sen',
+            line=dict(color='blue', width=1)
+        ))
+
+        # Crear área sombreada para Kumo (nube)
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['senkou_a'],
+            mode='lines',
+            name='Senkou Span A',
+            line=dict(color='rgba(119, 152, 191, 0.5)', width=0.5)
+        ))
+        fig.add_trace(go.Scatter(
+            x=df['timestamp'],
+            y=df['senkou_b'],
+            mode='lines',
+            name='Senkou Span B',
+            line=dict(color='rgba(119, 152, 191, 0.5)', width=0.5),
+            fill='tonexty',
+            fillcolor='rgba(119, 152, 191, 0.2)'
+        ))
+
+    if config["indicadores"]["usar_fibonacci"] and len(df) > 10:
+        niveles = calcular_fibonacci(df)
+        for nivel, valor in niveles.items():
+            fig.add_shape(
+                type="line",
+                x0=df['timestamp'].iloc[0],
+                x1=df['timestamp'].iloc[-1],
+                y0=valor,
+                y1=valor,
+                line=dict(color="purple", width=1, dash="dash"),
+                name=f"Fib {nivel}"
+            )
+            fig.add_annotation(
+                x=df['timestamp'].iloc[-1],
+                y=valor,
+                text=f"Fib {nivel}",
+                showarrow=False,
+                xshift=10,
+                font=dict(size=8, color="purple")
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+    return fig
 
-        # Opción de descarga
-        if st.button("📥 Descargar Datos CSV"):
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="💾 Descargar CSV",
-                data=csv,
-                file_name=f"{selected_symbol}_{timeframe}_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+# Función para generar mensaje de alerta con nivel de fiabilidad
+def generar_mensaje_alerta(symbol, tipo, precio, fiabilidad, timeframe, patrones_vela):
+    # Emojis según nivel de fiabilidad
+    emoji_fiabilidad = "⚠️" if fiabilidad['nivel'] == "bajo" else "✅" if fiabilidad['nivel'] == "alto" else "ℹ️"
 
-else:
-    st.error(f"❌ No se pudieron obtener datos para {selected_symbol}")
+    # Emojis según tipo de señal
+    emoji_tipo = {
+        "DOBLE SUELO": "🔵",
+        "TRIPLE SUELO": "🟣",
+        "DIVERGENCIA ALCISTA": "📈",
+        "DIVERGENCIA BAJISTA": "📉",
+        "CAMBIO DE TENDENCIA ALCISTA": "🚀"
+    }.get(tipo, "🔍")
 
-# === INFORMACIÓN ===
-st.markdown("---")
-st.markdown("""
-### ℹ️ Información del Bot
+    mensaje = (
+        f"{emoji_tipo} {tipo} DETECTADO\n"
+        f"Par: {symbol}\n"
+        f"Temporalidad: {timeframe}\n"
+        f"Precio actual: {precio:.8f}\n"
+        f"{emoji_fiabilidad} Fiabilidad: {fiabilidad['porcentaje']}% ({fiabilidad['nivel']})\n"
+    )
 
-**Funcionalidades:**
-- 🔍 Detección automática de doble y triple suelo
-- 📈 Análisis de cruces de EMAs y señales MACD
-- 🕯️ Reconocimiento de patrones de vela
-- 📱 Alertas automáticas por Telegram
-- 🔄 Autoanálisis programable por par y timeframe
-- 📊 Análisis masivo diario de todas las monedas
+    # Añadir patrones de vela confirmatorios si existen
+    patrones_presentes = [k for k, v in patrones_vela.items() if v]
+    if patrones_presentes:
+        mensaje += f"Patrones confirmatorios: {', '.join(patrones_presentes)}\n"
 
-**Autoanálisis:**
-- Configura la frecuencia de análisis para cada par
-- Análisis automático 24/7 sin intervención manual
-- Resúmenes automáticos por Telegram
+    return mensaje
 
-**Timeframes soportados:** 12h, 1d, 3d, 1w, 1M
-""")
+# Función principal que integra todas las mejoras
+def aplicar_mejoras(st_obj, df, exchange, symbols, historial_alertas, config_suelos):
+    # Mostrar configuración avanzada en la barra lateral
+    with st_obj.sidebar:
+        st_obj.sidebar.markdown("---")
+        config_avanzada = mostrar_configuracion_avanzada()
 
-# Auto-refresh
-time.sleep(refresh_rate_min * 60)
-st.rerun()
+    # Si estamos analizando un par específico
+    if df is not None:
+        # Calcular indicadores adicionales
+        df = calcular_indicadores_adicionales(df, config_avanzada)
+
+        # Detectar patrones de vela adicionales
+        df, patrones_vela = detectar_patrones_vela(df, config_avanzada)
+
+        # Detectar patrones de suelo con tolerancia mejorada
+        patrones_suelo = detectar_doble_triple_suelo_mejorado(df, config_avanzada)
+
+        # Evaluar fiabilidad de las señales
+        fiabilidad_doble_suelo = evaluar_fiabilidad_senal(df, 'doble_suelo', patrones_vela, config_avanzada)
+        fiabilidad_triple_suelo = evaluar_fiabilidad_senal(df, 'triple_suelo', patrones_vela, config_avanzada)
+
+        # Mostrar información de fiabilidad si hay patrones detectados
+        if patrones_suelo['doble'] or patrones_suelo['triple']:
+            st_obj.markdown("### 📊 Fiabilidad de las Señales")
+
+            if patrones_suelo['doble']:
+                nivel_color = "red" if fiabilidad_doble_suelo['nivel'] == "bajo" else "green" if fiabilidad_doble_suelo['nivel'] == "alto" else "orange"
+                st_obj.markdown(f"**Doble Suelo**: <span style='color:{nivel_color};'>{fiabilidad_doble_suelo['porcentaje']}% ({fiabilidad_doble_suelo['nivel']})</span>", unsafe_allow_html=True)
+
+            if patrones_suelo['triple']:
+                nivel_color = "red" if fiabilidad_triple_suelo['nivel'] == "bajo" else "green" if fiabilidad_triple_suelo['nivel'] == "alto" else "orange"
+                st_obj.markdown(f"**Triple Suelo**: <span style='color:{nivel_color};'>{fiabilidad_triple_suelo['porcentaje']}% ({fiabilidad_triple_suelo['nivel']})</span>", unsafe_allow_html=True)
+
+        # Devolver los datos y análisis mejorados
+        return {
+            'df': df,
+            'patrones_suelo': patrones_suelo,
+            'patrones_vela': patrones_vela,
+            'fiabilidad_doble_suelo': fiabilidad_doble_suelo,
+            'fiabilidad_triple_suelo': fiabilidad_triple_suelo,
+            'config_avanzada': config_avanzada
+        }
+
+    return None
