@@ -9,9 +9,10 @@ import json
 import os
 from datetime import datetime, timedelta
 import newstuff
+from newstuff import guardar_config_auto as gh_guardar_auto_config
 
 st.set_page_config(
-    page_title="Bot de Análisis Crypto - Poloniex", 
+    page_title="Análisis Crypto", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -100,23 +101,17 @@ def guardar_auto_config(config_auto):
     with open(AUTO_CONFIG_FILE, "w") as f:
         json.dump(config_auto, f, indent=2)
 
-def set_auto_config(symbol, timeframe, valor):
-    config = cargar_auto_config()
-    if symbol not in config:
-        config[symbol] = {}
-    config[symbol][timeframe] = valor
-    guardar_auto_config(config)
-
 def remove_auto_config(symbol, timeframe=None):
     config = cargar_auto_config()
     if symbol in config:
         if timeframe and timeframe in config[symbol]:
             del config[symbol][timeframe]
-            if not config[symbol]:  # Si no quedan timeframes, eliminar el símbolo
+            if not config[symbol]:
                 del config[symbol]
         else:
             del config[symbol]
-        guardar_auto_config(config)
+        # guarda local + sube a GitHub
+        gh_guardar_auto_config(config)
 
 # === FUNCIONES DE ALERTA Y ANÁLISIS ===
 def send_telegram_alert(message, symbol, timestamp, tipo):
