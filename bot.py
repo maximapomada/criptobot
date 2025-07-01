@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timedelta
 import newstuff
 from newstuff import guardar_config_auto as gh_guardar_auto_config
+from newstuff import set_auto_config
 
 st.set_page_config(
     page_title="Análisis Crypto", 
