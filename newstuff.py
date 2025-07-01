@@ -536,3 +536,51 @@ def aplicar_mejoras(st_obj, df, exchange, symbols, historial_alertas, config_sue
         }
 
     return None
+
+import base64
+import requests
+
+def subir_a_github(filepath, repo, ruta_destino, rama="main"):
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        print("❌ GITHUB_TOKEN no está definido.")
+        return
+
+    url_api = f"https://api.github.com/repos/{repo}/contents/{ruta_destino}"
+    
+    with open(filepath, "rb") as f:
+        contenido = f.read()
+    contenido_b64 = base64.b64encode(contenido).decode("utf-8")
+
+    # Obtener SHA del archivo si ya existe
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json"
+    }
+    get_resp = requests.get(url_api, headers=headers, params={"ref": rama})
+    
+    sha = None
+    if get_resp.status_code == 200:
+        sha = get_resp.json()["sha"]
+
+    payload = {
+        "message": "Actualización automática de config_auto.json",
+        "content": contenido_b64,
+        "branch": rama
+    }
+    if sha:
+        payload["sha"] = sha
+
+    put_resp = requests.put(url_api, headers=headers, json=payload)
+    if put_resp.status_code in [200, 201]:
+        print("✅ Archivo subido a GitHub correctamente.")
+    else:
+        print("❌ Error al subir a GitHub:", put_resp.json())
+
+# Guardar y subir config_auto.json
+def guardar_config_auto(config, ruta="config_auto.json"):
+    with open(ruta, "w") as f:
+        json.dump(config, f, indent=2)
+    print("✅ Configuración guardada localmente.")
+    subir_a_github(ruta, repo="maximapomada/criptobot", ruta_destino="config_auto.json", rama="main")
+
