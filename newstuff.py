@@ -1128,3 +1128,159 @@ def set_auto_config(symbol, timeframe, valor):
         config[symbol] = {}
     config[symbol][timeframe] = valor
     guardar_config_auto(config)
+
+# === DETECCIÓN DE DIVERGENCIAS ALCISTAS/BAJISTAS ===
+
+def detectar_divergencias(df, ventana=30):
+    """Detecta divergencias RSI y MACD frente al precio."""
+    if len(df) < ventana + 3 or 'rsi' not in df.columns or 'macd' not in df.columns:
+        return {'rsi': None, 'macd': None}
+
+    divergencias = {'rsi': None, 'macd': None}
+
+    # RSI
+    precios = df['close'].tail(ventana).values
+    rsi_vals = df['rsi'].tail(ventana).values
+
+    for i in range(2, ventana - 2):
+        # Doble mínimo en precio + RSI ascendente -> divergencia alcista
+        if precios[i - 2] > precios[i] < precios[i + 2]:
+            if rsi_vals[i - 2] < rsi_vals[i] and rsi_vals[i] > rsi_vals[i + 2]:
+                divergencias['rsi'] = 'alcista'
+                break
+        # Doble máximo en precio + RSI descendente -> divergencia bajista
+        if precios[i - 2] < precios[i] > precios[i + 2]:
+            if rsi_vals[i - 2] > rsi_vals[i] and rsi_vals[i] < rsi_vals[i + 2]:
+                divergencias['rsi'] = 'bajista'
+                break
+
+    # MACD
+    macd_vals = df['macd'].tail(ventana).values
+
+    for i in range(2, ventana - 2):
+        if precios[i - 2] > precios[i] < precios[i + 2]:
+            if macd_vals[i - 2] < macd_vals[i] and macd_vals[i] > macd_vals[i + 2]:
+                divergencias['macd'] = 'alcista'
+                break
+        if precios[i - 2] < precios[i] > precios[i + 2]:
+            if macd_vals[i - 2] > macd_vals[i] and macd_vals[i] < macd_vals[i + 2]:
+                divergencias['macd'] = 'bajista'
+                break
+
+    return divergencias
+
+# === VALIDACIÓN AVANZADA POR VOLUMEN ===
+
+def validar_con_volumen(df, config, multiplicador=1.5):
+    """Valida si el volumen actual supera el promedio reciente."""
+    if 'volume' not in df.columns or len(df) < 10:
+        return False
+
+    vol_actual = df['volume'].iloc[-1]
+    vol_promedio = df['volume'].tail(10).mean()
+
+    # Se considera válido si supera el promedio por X multiplicador
+    return vol_actual >= vol_promedio * multiplicador
+# === CÁLCULO DE PUNTAJE COMPUESTO DE SEÑALES ===
+
+def calcular_puntaje_senal(df, patrones_suelo, patrones_vela, divergencias, config):
+    """Evalúa señales múltiples y asigna un puntaje compuesto (0 a 100)."""
+    puntaje = 0
+    razones = []
+
+    # Base por tipo de suelo
+    if patrones_suelo.get('doble'):
+        puntaje += 30
+        razones.append("🔵 Doble suelo")
+    if patrones_suelo.get('triple'):
+        puntaje += 40
+        razones.append("🟣 Triple suelo")
+
+    # Divergencias
+    if divergencias['rsi'] == 'alcista':
+        puntaje += 15
+        razones.append("📈 Divergencia RSI alcista")
+    if divergencias['macd'] == 'alcista':
+        puntaje += 10
+        razones.append("📈 Divergencia MACD alcista")
+
+    # Volumen
+    if validar_con_volumen(df, config):
+        puntaje += 10
+        razones.append("💥 Volumen elevado")
+
+    # Patrones de vela confirmatorios
+    patrones_alcistas = ['hammer', 'morning_star', 'harami']
+    cantidad = sum(1 for p in patrones_alcistas if patrones_vela.get(p))
+    puntaje += cantidad * 5
+    if cantidad > 0:
+        razones.append(f"🕯️ {cantidad} patrón(es) de vela")
+
+    # Límite de 100
+    puntaje = min(puntaje, 100)
+
+    return {
+        'puntaje': puntaje,
+        'razones': razones
+    }
+def aplicar_mejoras(st_obj, df, exchange, symbols, historial_alertas, config_suelos):
+    # Mostrar configuración avanzada en la barra lateral
+    with st_obj.sidebar:
+        st_obj.sidebar.markdown("---")
+        config_avanzada = mostrar_configuracion_avanzada()
+
+    if df is not None:
+        # Calcular indicadores adicionales
+        df = calcular_indicadores_adicionales(df, config_avanzada)
+
+        # Detectar patrones de vela adicionales
+        df, patrones_vela = detectar_patrones_vela(df, config_avanzada)
+
+        # Detectar patrones de suelo
+        patrones_suelo = detectar_doble_triple_suelo_mejorado(df, config_avanzada)
+
+        # Detectar divergencias RSI/MACD
+        divergencias = detectar_divergencias(df)
+
+        # Evaluar fiabilidad individual
+        fiabilidad_doble_suelo = evaluar_fiabilidad_senal(df, 'doble_suelo', patrones_vela, config_avanzada)
+        fiabilidad_triple_suelo = evaluar_fiabilidad_senal(df, 'triple_suelo', patrones_vela, config_avanzada)
+
+        # Evaluar puntaje compuesto
+        puntaje_total = calcular_puntaje_senal(
+            df,
+            patrones_suelo,
+            patrones_vela,
+            divergencias,
+            config_avanzada
+        )
+
+        # Mostrar sección de puntuación
+        if puntaje_total['puntaje'] >= 50:
+            st_obj.markdown("### ✅ Señal Compuesta Detectada")
+            st_obj.markdown(f"**Puntaje total:** {puntaje_total['puntaje']} / 100")
+            for r in puntaje_total['razones']:
+                st_obj.markdown(f"- {r}")
+
+        # Mostrar fiabilidad de suelos
+        if patrones_suelo['doble'] or patrones_suelo['triple']:
+            st_obj.markdown("### 📊 Fiabilidad de las Señales")
+
+            if patrones_suelo['doble']:
+                color = "red" if fiabilidad_doble_suelo['nivel'] == "bajo" else "orange" if fiabilidad_doble_suelo['nivel'] == "medio" else "green"
+                st_obj.markdown(f"**Doble Suelo**: <span style='color:{color};'>{fiabilidad_doble_suelo['porcentaje']}% ({fiabilidad_doble_suelo['nivel']})</span>", unsafe_allow_html=True)
+
+            if patrones_suelo['triple']:
+                color = "red" if fiabilidad_triple_suelo['nivel'] == "bajo" else "orange" if fiabilidad_triple_suelo['nivel'] == "medio" else "green"
+                st_obj.markdown(f"**Triple Suelo**: <span style='color:{color};'>{fiabilidad_triple_suelo['porcentaje']}% ({fiabilidad_triple_suelo['nivel']})</span>", unsafe_allow_html=True)
+
+        return {
+            'df': df,
+            'patrones_suelo': patrones_suelo,
+            'patrones_vela': patrones_vela,
+            'fiabilidad_doble_suelo': fiabilidad_doble_suelo,
+            'fiabilidad_triple_suelo': fiabilidad_triple_suelo,
+            'divergencias': divergencias,
+            'puntaje_total': puntaje_total,
+            'config_avanzada': config_avanzada
+        }
