@@ -72,25 +72,29 @@ def mostrar_configuracion_avanzada():
                 "Volumen mínimo (BTC)",
                 min_value=0.0,
                 value=float(config["filtros"]["volumen_minimo"]),
-                step=0.1
+                step=0.1,
+                key="volumen_minimo"
             )
             config["filtros"]["tolerancia_patrones"] = st.slider(
                 "Tolerancia de patrones (%)",
                 min_value=0.5,
                 max_value=10.0,
                 value=float(config["filtros"]["tolerancia_patrones"] * 100),
-                step=0.5
+                step=0.5,
+                key="tolerancia_patrones"
             ) / 100
         with col2:
             config["filtros"]["confirmacion_patrones"] = st.checkbox(
                 "Requerir confirmación de patrones",
-                value=config["filtros"]["confirmacion_patrones"]
+                value=config["filtros"]["confirmacion_patrones"],
+                key="confirmacion_patrones"
             )
             config["filtros"]["min_velas_patron"] = st.number_input(
                 "Mínimo de velas para patrón",
                 min_value=2,
                 max_value=10,
-                value=int(config["filtros"]["min_velas_patron"])
+                value=int(config["filtros"]["min_velas_patron"]),
+                key="min_velas_patron"
             )
 
     with st.expander("Indicadores Adicionales"):
@@ -98,31 +102,37 @@ def mostrar_configuracion_avanzada():
         with col1:
             config["indicadores"]["usar_bollinger"] = st.checkbox(
                 "Bandas de Bollinger",
-                value=config["indicadores"]["usar_bollinger"]
+                value=config["indicadores"]["usar_bollinger"],
+                key="usar_bollinger"
             )
             config["indicadores"]["usar_fibonacci"] = st.checkbox(
                 "Retrocesos de Fibonacci",
-                value=config["indicadores"]["usar_fibonacci"]
+                value=config["indicadores"]["usar_fibonacci"],
+                key="usar_fibonacci"
             )
         with col2:
             config["indicadores"]["usar_ichimoku"] = st.checkbox(
                 "Ichimoku Cloud",
-                value=config["indicadores"]["usar_ichimoku"]
+                value=config["indicadores"]["usar_ichimoku"],
+                key="usar_ichimoku"
             )
             config["indicadores"]["usar_atr"] = st.checkbox(
                 "ATR (Average True Range)",
-                value=config["indicadores"]["usar_atr"]
+                value=config["indicadores"]["usar_atr"],
+                key="usar_atr"
             )
 
     with st.expander("Configuración de Alertas"):
         config["alertas"]["nivel_fiabilidad"] = st.select_slider(
             "Nivel de fiabilidad requerido",
             options=["bajo", "medio", "alto"],
-            value=config["alertas"]["nivel_fiabilidad"]
+            value=config["alertas"]["nivel_fiabilidad"],
+            key="nivel_fiabilidad"
         )
         config["alertas"]["mostrar_probabilidad"] = st.checkbox(
             "Mostrar probabilidad en alertas",
-            value=config["alertas"]["mostrar_probabilidad"]
+            value=config["alertas"]["mostrar_probabilidad"],
+            key="mostrar_probabilidad"
         )
 
     with st.expander("Patrones de Vela Adicionales"):
@@ -130,45 +140,51 @@ def mostrar_configuracion_avanzada():
         with col1:
             config["patrones_vela"]["doji"] = st.checkbox(
                 "Doji",
-                value=config["patrones_vela"]["doji"]
+                value=config["patrones_vela"]["doji"],
+                key="doji"
             )
             config["patrones_vela"]["morning_star"] = st.checkbox(
                 "Morning Star",
-                value=config["patrones_vela"]["morning_star"]
+                value=config["patrones_vela"]["morning_star"],
+                key="morning_star"
             )
             config["patrones_vela"]["harami"] = st.checkbox(
                 "Harami",
-                value=config["patrones_vela"]["harami"]
+                value=config["patrones_vela"]["harami"],
+                key="harami"
             )
         with col2:
             config["patrones_vela"]["evening_star"] = st.checkbox(
                 "Evening Star",
-                value=config["patrones_vela"]["evening_star"]
+                value=config["patrones_vela"]["evening_star"],
+                key="evening_star"
             )
             config["patrones_vela"]["shooting_star"] = st.checkbox(
                 "Shooting Star",
-                value=config["patrones_vela"]["shooting_star"]
+                value=config["patrones_vela"]["shooting_star"],
+                key="shooting_star"
             )
 
     with st.expander("Optimización de Rendimiento"):
         config["rendimiento"]["analisis_paralelo"] = st.checkbox(
             "Análisis en paralelo (experimental)",
-            value=config["rendimiento"]["analisis_paralelo"]
+            value=config["rendimiento"]["analisis_paralelo"],
+            key="analisis_paralelo"
         )
         if config["rendimiento"]["analisis_paralelo"]:
             config["rendimiento"]["max_pares_simultaneos"] = st.slider(
                 "Máximo de pares simultáneos",
                 min_value=5,
                 max_value=50,
-                value=int(config["rendimiento"]["max_pares_simultaneos"])
+                value=int(config["rendimiento"]["max_pares_simultaneos"]),
+                key="max_pares_simultaneos"
             )
 
-    if st.button("Guardar Configuración Avanzada"):
+    if st.button("Guardar Configuración Avanzada", key="guardar_configuracion_avanzada"):
         guardar_config_avanzada(config)
         st.success("✅ Configuración guardada correctamente")
 
     return config
-
 # Función para calcular indicadores adicionales
 def calcular_indicadores_adicionales(df, config):
     # Bandas de Bollinger
