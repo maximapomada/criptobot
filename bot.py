@@ -631,6 +631,13 @@ if df is not None and len(df) > 20:
         with col4:
             st.metric("🕯️ Patrón Reversión", "✅ SÍ" if resultado['patron_reversion'] else "❌ NO")
 
+        # NUEVO: Evaluación compuesta
+        if 'puntaje_total' in resultado and resultado['puntaje_total']['puntaje'] >= 50:
+            st.markdown("### 🔎 Evaluación Compuesta")
+            st.info(f"**Puntaje total:** {resultado['puntaje_total']['puntaje']} / 100")
+            for razon in resultado['puntaje_total']['razones']:
+                st.markdown(f"- {razon}")
+
         # Mostrar patrones de vela
         if resultado['patrones_vela']:
             st.markdown("### 🕯️ Patrones de Vela Detectados")
